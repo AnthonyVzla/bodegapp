@@ -1,0 +1,1606 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POS Venezuela - Cierre de Caja (v5.10.2)</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    
+    <style>
+        body { background-color: #eef2f7; padding-bottom: 80px; font-family: 'Segoe UI', sans-serif; }
+        .nav-btn-group { overflow-x: auto; white-space: nowrap; padding: 10px; background: white; border-bottom: 1px solid #ddd; }
+        .btn-nav { border-radius: 20px; margin-right: 5px; font-size: 0.9rem; }
+        .btn-nav.active { background-color: #0d6efd; color: white; border: none; }
+        .card-product { border: none; border-radius: 12px; background: white; box-shadow: 0 2px 5px rgba(0,0,0,0.05); transition: transform 0.1s; cursor: pointer; }
+        .card-product:active { transform: scale(0.98); }
+        .price-usd { font-weight: 800; color: #2c3e50; font-size: 1.1em; }
+        .floating-cart {
+            position: fixed; bottom: 20px; right: 20px; 
+            background: #198754; color: white; 
+            width: 60px; height: 60px; border-radius: 50%; 
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3); z-index: 1000;
+            font-size: 1.5rem; cursor: pointer;
+        }
+        .cart-badge { position: absolute; top: -5px; right: -5px; background: red; color: white; font-size: 0.7rem; padding: 5px 8px; border-radius: 50%; }
+
+        /* Login Modal Overlay */
+        .login-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.8); z-index: 5000; display: flex; align-items: center; justify-content: center; }
+        
+        /* Reportes */
+        .card-report { border: none; border-radius: 10px; padding: 15px; color: white; }
+
+        /* Estilos de impresión para Factura/Reporte */
+        @media print {
+            body * { visibility: hidden; }
+            #area-impresion, #area-impresion * { visibility: visible; }
+            #area-impresion { 
+                position: absolute; left: 0; top: 0; 
+                width: 100%; margin: 0; padding: 0; 
+                font-family: monospace; 
+                font-size: 10px; 
+            }
+            .no-print { display: none !important; }
+            /* Estilo para reporte X/Z, forzar ancho completo */
+            #reporte-impresion {
+                width: 100%;
+                margin: 0;
+                padding: 5mm; 
+                box-sizing: border-box;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div id="app">
+
+    <div v-if="!isLoggedIn" class="login-overlay">
+        <div class="card p-4 shadow-lg" style="width: 90%; max-width: 350px;">
+            <div class="text-center mb-3">
+                <i class="fas fa-lock fa-3x text-primary mb-2"></i>
+                <h5 class="fw-bold">Ingreso al Sistema</h5>
+            </div>
+            <input type="text" v-model="loginData.username" class="form-control mb-2" placeholder="Usuario" @keyup.enter="login">
+            <input type="password" v-model="loginData.password" class="form-control mb-3" placeholder="Clave" @keyup.enter="login">
+            <button @click="login" class="btn btn-primary w-100">Acceder</button>
+        </div>
+    </div>
+    
+    <div v-if="isLoggedIn">
+
+        <nav class="navbar navbar-dark bg-dark p-2 sticky-top">
+            <div class="container-fluid d-flex justify-content-between align-items-center">
+                <span class="navbar-brand mb-0 h1" style="font-size: 1rem;">
+                    <i class="fas fa-store"></i> {{ config.nombreComercial || 'POS Venezuela' }}
+                </span>
+                <div class="d-flex align-items-center">
+                    <div class="d-flex align-items-center bg-white rounded px-2 py-1 me-2">
+                        <small class="me-2 fw-bold text-dark">BCV:</small>
+                        <input type="number" v-model.number="tasaBCV" class="form-control form-control-sm border-0 p-0 text-end fw-bold text-primary" style="width: 60px;" step="0.01">
+                    </div>
+                    <button @click="logout" class="btn btn-sm btn-outline-light"><i class="fas fa-sign-out-alt"></i></button>
+                </div>
+            </div>
+        </nav>
+
+        <div class="nav-btn-group sticky-top shadow-sm" style="top: 56px; z-index: 990;">
+            <button @click="vistaActual = 'pos'" :class="['btn btn-outline-secondary btn-nav', vistaActual === 'pos' ? 'active' : '']">Vender</button>
+            <button v-if="checkPermission(['admin', 'supervisor'])" @click="vistaActual = 'reportes'; aplicarFiltro()" :class="['btn btn-outline-secondary btn-nav', vistaActual === 'reportes' ? 'active' : '']">Reportes</button>
+            <button v-if="checkPermission(['admin', 'supervisor', 'cajero'])" @click="vistaActual = 'historial'" :class="['btn btn-outline-secondary btn-nav', vistaActual === 'historial' ? 'active' : '']">Historial</button>
+            <button v-if="checkPermission(['admin', 'supervisor'])" @click="vistaActual = 'inventario'" :class="['btn btn-outline-secondary btn-nav', vistaActual === 'inventario' ? 'active' : '']">Inventario</button>
+            <button v-if="checkPermission(['admin'])" @click="vistaActual = 'config'" :class="['btn btn-outline-secondary btn-nav', vistaActual === 'config' ? 'active' : '']">Configuración</button>
+        </div>
+
+        <div class="container mt-3">
+            
+            <div v-if="vistaActual === 'pos'">
+                <div class="input-group mb-3 shadow-sm">
+                    <span class="input-group-text bg-white border-0"><i class="fas fa-search"></i></span>
+                    <input type="text" v-model="busqueda" class="form-control border-0" placeholder="Buscar productos...">
+                </div>
+                <div class="row g-2">
+                    <div class="col-6 col-md-4" v-for="prod in productosFiltrados" :key="prod.id">
+                        <div class="card-product p-3 h-100" @click="iniciarVenta(prod)">
+                            <div class="fw-bold text-truncate">{{ prod.nombre }}</div>
+                            <small class="text-muted d-block mb-1">{{ prod.unidadMedida }}</small>
+                            <div class="mt-2">
+                                <div class="price-usd">${{ formatMoney(prod.precioUSD, true) }}</div>
+                                <div class="price-bs">Bs.{{ formatMoney(prod.precioUSD * tasaBCV, true) }}</div>
+                            </div>
+                            <div class="mt-2 border-top pt-1 d-flex justify-content-between" style="font-size: 0.7rem;">
+                                <span class="text-muted">Stk: {{ prod.stockTotal }}</span>
+                            </div>
+                            <div v-if="checkPermission(['admin', 'supervisor'])" class="text-end mt-1">
+                                <i class="fas fa-edit text-info" @click.stop="ajustarPrecioRapido(prod)"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="floating-cart" @click="abrirCarrito" v-if="carrito.length > 0"> 
+                    <i class="fas fa-shopping-cart"></i>
+                    <span class="cart-badge">{{ carritoItemsCount }}</span>
+                </div>
+                <button v-if="checkPermission(['cajero', 'supervisor', 'admin'])" @click="abrirModalCierre" class="btn btn-warning btn-lg shadow fixed-bottom mb-3 mx-auto" style="width: 90%; max-width: 400px; z-index: 1000;">
+                    <i class="fas fa-cash-register me-2"></i> Cerrar Caja (Mi Turno)
+                </button>
+            </div>
+
+            <div v-if="vistaActual === 'inventario'">
+                <h5 class="mb-3"><i class="fas fa-box"></i> Gestión de Inventario</h5>
+                
+                <div class="card shadow-sm border-0 p-3 mb-3 bg-light">
+                    <h6 class="fw-bold text-primary"><i class="fas fa-plus"></i> Carga Rápida (Inventario Existente)</h6>
+                    <p class="small text-muted">Aquí ingresas tu inventario actual, definiendo **Costo**, **Venta** y **Cantidad Inicial** a la vez.</p>
+                    <div class="row g-2">
+                        <div class="col-12"><input v-model="nuevoProducto.nombre" placeholder="Nombre Producto" class="form-control form-control-sm"></div>
+                        
+                        <div class="col-6">
+                            <label class="form-label small mb-0 text-muted">Unidad de Medida</label>
+                            <select v-model="nuevoProducto.unidadMedida" class="form-select form-select-sm">
+                                <option value="Unidad">Unidad</option>
+                                <option value="Kilo">Kilo/Peso</option>
+                                <option value="Bulto">Bulto</option>
+                                <option value="Caja">Caja</option>
+                                <option value="Peso">Peso (General)</option>
+                            </select>
+                        </div>
+                        
+                        <div class="col-6"><label class="form-label small mb-0 text-muted">Precio Venta ($)</label><input v-model.number="nuevoProducto.precioUSD" type="number" class="form-control form-control-sm" placeholder="0.00"></div>
+                        
+                        <div class="col-6"><label class="form-label small mb-0 text-muted">Costo Promedio ($)</label><input v-model.number="nuevoProducto.costoUSD" type="number" class="form-control form-control-sm" placeholder="0.00"></div>
+                        <div class="col-6"><label class="form-label small mb-0 text-muted">Cantidad Inicial</label><input v-model.number="nuevoProducto.stock" type="number" class="form-control form-control-sm" placeholder="0"></div>
+
+                        <div class="col-12 d-flex align-items-end"><button @click="crearProductoInventarioInicial" class="btn btn-primary btn-sm w-100" :disabled="!esDataInventarioValida">Guardar Inventario Existente</button></div>
+                    </div>
+                </div>
+
+                <div class="card shadow-sm border-0 p-3 mb-3">
+                    <h6 class="fw-bold text-success"><i class="fas fa-box-open"></i> Ingreso de Nuevo Lote (Reabastecimiento)</h6>
+                    <p class="small text-muted">Usa esta sección para registrar **futuras compras** y gestionar el costo por lote.</p>
+                    <select v-model="loteData.productoId" class="form-select form-select-sm mb-2">
+                        <option :value="null" disabled>Seleccione Producto Base ({{ inventario.length }})</option>
+                        <option v-for="prod in inventario" :value="prod.id" :key="prod.id">{{ prod.nombre }} (Stock Base: {{ prod.stockTotal }})</option>
+                    </select>
+                    <div v-if="loteData.productoId" class="row g-2">
+                        
+                        <div class="col-12 mb-2">
+                            <div class="alert alert-primary py-1 mb-0 small fw-bold">
+                                P. Venta Actual: ${{ formatMoney(productoSeleccionadoLote.precioUSD, true) }} | Costo Promedio: ${{ formatMoney(costoPromedioProductoLote, true) }}
+                            </div>
+                        </div>
+
+                        <div class="col-6"><label class="form-label small mb-0 text-muted">Cantidad/Peso (Ingreso)</label><input v-model.number="loteData.stock" type="number" class="form-control form-control-sm" placeholder="Cantidad"></div>
+                        <div class="col-6"><label class="form-label small mb-0 text-muted">Costo Unitario ($)</label><input v-model.number="loteData.costoUSD" type="number" class="form-control form-control-sm" placeholder="0.00"></div>
+                        <div class="col-6"><label class="form-label small mb-0 text-muted">Fecha Vencimiento (Opc)</label><input v-model="loteData.fechaVencimiento" type="date" class="form-control form-control-sm"></div>
+                        <div class="col-6"><label class="form-label small mb-0 text-muted">Proveedor</label><input v-model="loteData.proveedor" class="form-control form-control-sm" placeholder="Nombre Proveedor"></div>
+                        <div class="col-12"><button @click="registrarLote" class="btn btn-success btn-sm w-100">Registrar Lote</button></div>
+                    </div>
+                </div>
+
+                <div class="table-responsive bg-white shadow-sm rounded">
+                    <table class="table table-sm align-middle mb-0" style="font-size: 0.9rem;">
+                        <thead class="table-light"><tr><th>Prod</th><th>P.Venta</th><th>P.Costo</th><th>Stk Total</th><th>Lotes</th><th></th></tr></thead>
+                        <tbody>
+                            <tr v-for="prod in inventario" :key="prod.id">
+                                <td><div class="fw-bold text-truncate" style="max-width: 100px;">{{ prod.nombre }}</div><small class="text-muted">{{ prod.unidadMedida }}</small></td>
+                                <td class="fw-bold text-success">${{ formatMoney(prod.precioUSD, true) }}</td>
+                                <td class="fw-bold text-danger">${{ formatMoney(calcularCostoPromedio(prod), true) }}</td>
+                                <td class="text-info fw-bold">{{ formatMoney(prod.stockTotal) }}</td>
+                                <td><button class="btn btn-link btn-sm p-0" @click="mostrarLotes(prod)">Ver Lotes ({{ prod.lotes.length }})</button></td>
+                                <td><i @click="verificarAccion('eliminarProducto', prod.id)" class="fas fa-trash text-danger"></i></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div v-if="vistaActual === 'historial'">
+                <h5 class="mb-3"><i class="fas fa-history"></i> Historial de Ventas</h5>
+                <p class="small text-muted">Mostrando las últimas {{ ventas.length }} ventas registradas.</p>
+                <div class="list-group">
+                    <div v-for="venta in ventasOrdenadas" :key="venta.id" :class="['list-group-item list-group-item-action mb-2 shadow-sm rounded', {'list-group-item-danger': venta.estado === 'ANULADA'}]">
+                        <div class="d-flex w-100 justify-content-between">
+                            <h6 class="mb-1 fw-bold">Factura #{{ venta.id }} <span v-if="venta.estado === 'ANULADA'" class="badge bg-danger">ANULADA</span></h6>
+                            <small class="text-muted">{{ new Date(venta.id).toLocaleString() }}</small>
+                        </div>
+                        <p class="mb-1 small">
+                            Cliente: <span class="fw-bold">{{ venta.cliente.nombre || 'Consumidor Final' }}</span> | Cajero: <span class="fw-bold text-primary">{{ venta.usuario }}</span>
+                        </p>
+                        <div class="d-flex justify-content-between align-items-center mt-2">
+                            <h5 class="mb-0 text-success">${{ formatMoney(venta.totalUSD, true) }}</h5>
+                            <div>
+                                <button class="btn btn-outline-info btn-sm me-2" @click="mostrarDetalleFactura(venta)"><i class="fas fa-print"></i> Re-imprimir</button>
+                                <button v-if="venta.estado !== 'ANULADA'" 
+                                        @click="abrirModalAnular(venta)" 
+                                        class="btn btn-danger btn-sm">
+                                    <i class="fas fa-times"></i> Anular
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div v-if="ventas.length === 0" class="alert alert-warning text-center mt-4">Aún no hay ventas registradas.</div>
+            </div>
+
+            <div v-if="vistaActual === 'reportes'">
+                <h5 class="mb-3"><i class="fas fa-chart-line"></i> Reportes de Ventas y Cajas</h5>
+                
+                <div class="card shadow-sm border-0 p-3 mb-3 bg-light">
+                    <h6 class="fw-bold text-primary mb-3">Filtro de Reporte</h6>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-12 col-md-4">
+                            <label class="form-label small mb-0 text-muted">Tipo de Filtro</label>
+                            <select v-model="filtroReporte.tipo" class="form-select form-select-sm">
+                                <option value="rango">Rango de Fechas (Reporte Z)</option>
+                                <option value="usuario">Por Usuario (Cierre de Caja)</option>
+                            </select>
+                        </div>
+                        <div class="col-6 col-md-3" v-if="filtroReporte.tipo === 'rango'">
+                            <label class="form-label small mb-0 text-muted">Fecha Inicio</label>
+                            <input type="date" v-model="filtroReporte.fechaInicio" class="form-control form-control-sm">
+                        </div>
+                        <div class="col-6 col-md-3" v-if="filtroReporte.tipo === 'rango'">
+                            <label class="form-label small mb-0 text-muted">Fecha Fin</label>
+                            <input type="date" v-model="filtroReporte.fechaFin" class="form-control form-control-sm">
+                        </div>
+                        <div class="col-12 col-md-6" v-if="filtroReporte.tipo === 'usuario'">
+                            <label class="form-label small mb-0 text-muted">Seleccionar Cajero</label>
+                            <select v-model="filtroReporte.usuario" class="form-select form-select-sm">
+                                <option value="">--- Todos los Cajeros ---</option>
+                                <option v-for="user in users" :key="user.username" :value="user.username">{{ user.username }} ({{ user.role }})</option>
+                            </select>
+                        </div>
+                        <div class="col-12 col-md-2">
+                            <button @click="aplicarFiltro" class="btn btn-primary btn-sm w-100">Aplicar</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card shadow-sm border-0 p-3 mb-3 text-center">
+                    <h6 class="fw-bold text-success mb-3"><i class="fas fa-receipt"></i> Resumen de Venta y Recaudación</h6>
+                    <p class="small text-muted">Filtro: **{{ descripcionPeriodo }}** | Ventas Anuladas **NO** incluidas.</p>
+                    
+                    <div class="row border-bottom pb-2 mb-2">
+                        <div class="col-4">
+                            <div class="text-muted small">Venta Neta ($)</div>
+                            <h4 class="text-success">${{ formatMoney(reporteResumen.totalVenta, true) }}</h4>
+                        </div>
+                        <div class="col-4">
+                            <div class="text-muted small">Costo Total ($)</div>
+                            <h4 class="text-danger">${{ formatMoney(reporteResumen.totalCosto, true) }}</h4>
+                        </div>
+                        <div class="col-4">
+                            <div class="text-muted small">Ganancia (Utilidad)</div>
+                            <h4 class="text-primary">${{ formatMoney(reporteResumen.utilidad, true) }}</h4>
+                        </div>
+                    </div>
+
+                    <div class="row mt-3">
+                        <h6 class="fw-bold text-info border-bottom pb-1">Recaudación por Método de Pago</h6>
+                        <div v-for="(monto, metodo) in reporteResumen.totalesPago" :key="metodo" class="col-6 col-md-4 mb-2">
+                            <div class="bg-light p-2 rounded">
+                                <small class="text-muted">{{ metodo.replace(/_/g, ' ').toUpperCase() }}</small>
+                                <h5 class="mb-0 text-dark fw-bold">
+                                    <span v-if="metodo === 'dolares'">$</span>
+                                    <span v-else>Bs.</span>
+                                    {{ formatMoney(monto, true) }}
+                                </h5>
+                            </div>
+                        </div>
+                        <div v-if="Object.keys(reporteResumen.totalesPago).length === 0" class="col-12 text-muted small">No hay pagos registrados en este período.</div>
+                    </div>
+
+                    <button @click="imprimirReporte('Z')" class="btn btn-outline-success btn-sm mt-3"><i class="fas fa-print"></i> Imprimir Reporte Z / Cierre</button>
+                </div>
+
+                <div class="card shadow-sm border-0 p-3 mb-3">
+                    <h6 class="fw-bold text-info mb-3"><i class="fas fa-list-alt"></i> Venta Detallada por Producto (Reporte X)</h6>
+                    
+                    <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                        <table class="table table-sm table-striped align-middle mb-0" style="font-size: 0.8rem;">
+                            <thead class="table-dark sticky-top">
+                                <tr>
+                                    <th>Producto</th>
+                                    <th>Cant</th>
+                                    <th>P.Venta</th>
+                                    <th>Costo</th>
+                                    <th>Total ($)</th>
+                                    <th>Total Margen ($)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="(item, index) in reporteDetallado" :key="index">
+                                    <td>{{ item.nombre }}</td>
+                                    <td>{{ formatMoney(item.cantidad) }}</td>
+                                    <td class="text-success">${{ formatMoney(item.precioUSD, true) }}</td>
+                                    <td class="text-danger">${{ formatMoney(item.costoLoteUSD, true) }}</td>
+                                    <td class="fw-bold">${{ formatMoney(item.totalVenta, true) }}</td>
+                                    <td class="fw-bold text-primary">${{ formatMoney(item.totalMargen, true) }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <button @click="imprimirReporte('X')" class="btn btn-outline-info btn-sm mt-3"><i class="fas fa-print"></i> Imprimir Reporte X</button>
+                </div>
+            </div>
+
+            <div v-if="vistaActual === 'config'">
+                <div class="accordion" id="accordionConfig">
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="headingTienda">
+                            <button class="accordion-button fw-bold bg-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseTienda">
+                                <i class="fas fa-store me-2"></i> Datos de la Tienda (Factura)
+                            </button>
+                        </h2>
+                        <div id="collapseTienda" class="accordion-collapse collapse show">
+                            <div class="accordion-body">
+                                <div class="card p-3 shadow-sm border-0">
+                                    <label class="form-label small mb-1 text-muted">Nombre Comercial (Factura)</label>
+                                    <input v-model="config.nombreComercial" class="form-control mb-2" placeholder="Ej: Mi Abasto, C.A.">
+                                    
+                                    <label class="form-label small mb-1 text-muted">RIF/Cédula (Factura)</label>
+                                    <input v-model="config.rif" class="form-control mb-2" placeholder="J-00000000-0">
+                                    
+                                    <label class="form-label small mb-1 text-muted">Dirección (Factura)</label>
+                                    <input v-model="config.direccion" class="form-control mb-3" placeholder="Av. Principal, Edif. X">
+                                    
+                                    <button @click="guardarConfigTienda" class="btn btn-success"><i class="fas fa-save"></i> Guardar Configuración</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="headingUsers">
+                            <button class="accordion-button collapsed fw-bold bg-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseUsers">
+                                <i class="fas fa-users me-2"></i> Gestión de Usuarios y Roles
+                            </button>
+                        </h2>
+                        <div id="collapseUsers" class="accordion-collapse collapse">
+                            <div class="accordion-body">
+                                
+                                <h6 class="fw-bold text-primary">Crear Nuevo Usuario</h6>
+                                <div class="row g-2 mb-3">
+                                    <div class="col-12"><input v-model="nuevoUsuario.username" class="form-control form-control-sm" placeholder="Usuario (Ej: ana.cajero)"></div>
+                                    <div class="col-6"><input v-model="nuevoUsuario.password" type="password" class="form-control form-control-sm" placeholder="Clave"></div>
+                                    <div class="col-6">
+                                        <select v-model="nuevoUsuario.role" class="form-select form-select-sm">
+                                            <option value="cajero">Cajero</option>
+                                            <option value="supervisor">Supervisor</option>
+                                            <option value="admin">Administrador</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-12"><button @click="crearUsuario" class="btn btn-primary btn-sm w-100" :disabled="!nuevoUsuario.username || !nuevoUsuario.password">Crear Usuario</button></div>
+                                </div>
+
+                                <hr>
+                                
+                                <h6 class="fw-bold text-info">Lista de Usuarios ({{ users.length }})</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-striped">
+                                        <thead><tr><th>Usuario</th><th>Rol</th><th></th></tr></thead>
+                                        <tbody>
+                                            <tr v-for="user in users" :key="user.username">
+                                                <td>{{ user.username }}</td>
+                                                <td><span :class="['badge', user.role === 'admin' ? 'bg-danger' : user.role === 'supervisor' ? 'bg-warning text-dark' : 'bg-success']">{{ user.role }}</span></td>
+                                                <td>
+                                                    <i @click="verificarAccion('eliminarUsuario', user.username)" class="fas fa-trash text-danger" v-if="user.username !== currentUser.username && user.role !== 'admin'"></i>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                     <div class="accordion-item">
+                        <h2 class="accordion-header" id="headingGeneral">
+                            <button class="accordion-button collapsed fw-bold bg-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseGeneral">
+                                <i class="fas fa-wrench me-2"></i> Respaldo y Mantenimiento General
+                            </button>
+                        </button>
+                        </h2>
+                        <div id="collapseGeneral" class="accordion-collapse collapse">
+                            <div class="accordion-body">
+                                <button @click="descargarRespaldo" class="btn btn-primary w-100 mb-3">Descargar Respaldo (JSON)</button>
+                                <input type="file" @change="cargarRespaldo" class="form-control mb-3">
+                                <button @click="verificarAccion('limpiarDatos')" class="btn btn-danger w-100"><i class="fas fa-trash"></i> BORRAR TODO EL SISTEMA</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <hr>
+
+                <div class="card p-3 mb-4 shadow-sm border-0">
+                    <h5 class="fw-bold"><i class="fas fa-tags text-primary"></i> Etiquetas de Precios</h5>
+                    <p class="small text-muted">Genera un PDF con etiquetas para todos los productos en stock, con precios actualizados a la tasa BCV del día (Bs. {{ formatMoney(tasaBCV, true) }}).</p>
+                    <button @click="generarEtiquetasPDF" class="btn btn-secondary w-100"><i class="fas fa-file-pdf"></i> Generar PDF de Etiquetas</button>
+                </div>
+            </div>
+            
+        </div>
+
+        <div v-if="mostrarModalCantidad" class="fixed-top w-100 h-100 d-flex align-items-center justify-content-center" style="background: rgba(0,0,0,0.8); z-index: 2500;">
+            <div class="bg-white p-4 rounded shadow text-center" style="width: 90%; max-width: 350px;">
+                <h5 class="mb-3">Cantidad de: <br>**{{ productoEnVenta.nombre }}**</h5>
+                
+                <p v-if="['Kilo', 'Peso'].includes(productoEnVenta.unidadMedida)" class="text-muted small">
+                    Stock disponible: **{{ formatMoney(productoEnVenta.stockTotal) }}** {{ productoEnVenta.unidadMedida }}
+                </p>
+                <p v-else class="text-muted small">
+                    Stock disponible: **{{ formatMoney(productoEnVenta.stockTotal) }}** {{ productoEnVenta.unidadMedida }}
+                </p>
+
+                <input type="number" v-model.number="cantidadEnVenta" class="form-control form-control-lg text-center mb-3" placeholder="Cantidad" min="0" step="0.01">
+
+                <div v-if="cantidadEnVenta > 0 && productoEnVenta.precioUSD > 0">
+                    <p class="fw-bold mb-1">Precio Total:</p>
+                    <h4 class="text-success">$ {{ formatMoney(cantidadEnVenta * productoEnVenta.precioUSD, true) }}</h4>
+                </div>
+
+                <div class="d-grid gap-2 mt-3">
+                    <button @click="agregarAlCarrito(productoEnVenta, cantidadEnVenta)" 
+                            class="btn btn-primary btn-lg" 
+                            :disabled="cantidadEnVenta <= 0 || cantidadEnVenta > productoEnVenta.stockTotal">
+                        Añadir al Carrito
+                    </button>
+                    <button @click="mostrarModalCantidad = false; cantidadEnVenta = 0" class="btn btn-secondary">Cancelar</button>
+                </div>
+                <small v-if="cantidadEnVenta > productoEnVenta.stockTotal" class="text-danger mt-2 d-block">Stock Insuficiente (Máx: {{ formatMoney(productoEnVenta.stockTotal) }})</small>
+            </div>
+        </div>
+
+        <div v-if="modalLotes.visible" class="fixed-top w-100 h-100 d-flex align-items-center justify-content-center" style="background: rgba(0,0,0,0.8); z-index: 2500;">
+            <div class="bg-white p-4 rounded shadow" style="width: 90%; max-width: 500px;">
+                <h5 class="mb-3">Lotes de: **{{ modalLotes.producto.nombre }}**</h5>
+                <p class="small text-muted">Se venden por **FIFO** (fecha de vencimiento más antigua primero).</p>
+                
+                <table class="table table-sm table-striped">
+                    <thead><tr><th>#</th><th>Stk</th><th>Costo ($)</th><th>Proveedor</th><th>Vence</th></tr></thead>
+                    <tbody>
+                        <tr v-for="(l, i) in modalLotes.producto.lotes" :key="i" :class="{'table-warning': l.fechaVencimiento && new Date(l.fechaVencimiento) < new Date()}">
+                            <td>Lote {{ i + 1 }}</td>
+                            <td>{{ formatMoney(l.stock) }}</td>
+                            <td class="text-danger fw-bold">${{ formatMoney(l.costoUSD, true) }}</td>
+                            <td>{{ l.proveedor }}</td>
+                            <td>{{ l.fechaVencimiento || 'N/A' }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="text-end mt-3"><button @click="modalLotes.visible = false" class="btn btn-secondary">Cerrar</button></div>
+            </div>
+        </div>
+        
+        <div v-if="mostrarModalCarrito" class="fixed-top w-100 h-100 d-flex align-items-end" style="background: rgba(0,0,0,0.5); z-index: 2000;">
+            <div class="bg-white p-4 rounded-top shadow-lg w-100" style="max-height: 80vh; overflow-y: auto;">
+                <h4 class="mb-3 fw-bold"><i class="fas fa-shopping-cart text-primary"></i> Carrito de Compras</h4>
+                
+                <div v-for="(item, index) in carrito" :key="index" class="d-flex justify-content-between align-items-center border-bottom py-2">
+                    <div>
+                        <div class="fw-bold">{{ item.nombre }} ({{ item.unidadMedida }})</div>
+                        <small class="text-muted">{{ formatMoney(item.cantidad) }} x ${{ formatMoney(item.precioUSD, true) }}</small>
+                    </div>
+                    <div class="d-flex align-items-center">
+                        <span class="fw-bold me-3 text-success">${{ formatMoney(item.cantidad * item.precioUSD, true) }}</span>
+                        <button @click="removerItem(index)" class="btn btn-sm btn-outline-danger"><i class="fas fa-times"></i></button>
+                    </div>
+                </div>
+
+                <div class="mt-4 border-top pt-3">
+                    <h6 class="fw-bold text-muted border-bottom pb-1 mb-2">Datos del Cliente</h6>
+                    <div class="row g-2 mb-3">
+                        <div class="col-6"><input v-model="clienteActual.nombre" class="form-control form-control-sm" placeholder="Nombre/Empresa"></div>
+                        <div class="col-6"><input v-model="clienteActual.cedula" class="form-control form-control-sm" placeholder="C.I. o RIF"></div>
+                        <div class="col-6"><input v-model="clienteActual.telefono" class="form-control form-control-sm" placeholder="Teléfono (Opc.)"></div>
+                        <div class="col-6"><input v-model="clienteActual.direccion" class="form-control form-control-sm" placeholder="Dirección (Opc.)"></div>
+                    </div>
+
+                    <div class="d-flex justify-content-between mb-2">
+                        <span class="fw-bold">Total USD:</span>
+                        <h4 class="text-success">${{ formatMoney(totalCarritoUSD, true) }}</h4>
+                    </div>
+                    <div class="d-flex justify-content-between mb-3">
+                        <span class="fw-bold">Total BS (Tasa {{ formatMoney(tasaBCV) }}):</span>
+                        <h4 class="text-danger">Bs.{{ formatMoney(totalCarritoUSD * tasaBCV, true) }}</h4>
+                    </div>
+                    
+                    <h6 class="fw-bold text-muted border-top pt-2">Detalle de Pago</h6>
+                    
+                    <div v-for="(pago, pIndex) in pagos" :key="pIndex" class="alert alert-info py-1 mb-1 d-flex justify-content-between align-items-center">
+                        <span>{{ pago.montoUSD > 0 ? '$' : 'Bs.' }} {{ formatMoney(pago.montoDisplay, true) }} ({{ pago.metodo }})</span>
+                        <i class="fas fa-trash text-danger" @click="removerPago(pIndex)"></i>
+                    </div>
+
+                    <div class="input-group mb-2">
+                        <select v-model="metodoPagoNuevo" class="form-select form-select-sm" style="max-width: 120px;">
+                            <option value="dolares">Dólares</option>
+                            <option value="bolivares">Bolívares</option>
+                            <option value="pago_movil">Pago Móvil</option>
+                            <option value="transferencia">Transferencia</option>
+                            <option value="tarjeta">Tarjeta</option>
+                        </select>
+                        <input type="number" v-model.number="montoRecibido" class="form-control form-control-sm" :placeholder="'Monto en ' + (metodoPagoNuevo === 'bolivares' || metodoPagoNuevo === 'pago_movil' || metodoPagoNuevo === 'transferencia' ? 'Bs.' : '$')" step="0.01">
+                        <button @click="agregarPago" class="btn btn-secondary btn-sm"><i class="fas fa-plus"></i></button>
+                    </div>
+
+                    <div v-if="totalPagadoUSD > 0" class="alert alert-success py-1 d-flex justify-content-between align-items-center">
+                        <span class="fw-bold">Pagado: ${{ formatMoney(totalPagadoUSD, true) }}</span>
+                        <span class="fw-bold">Cambio: ${{ formatMoney(cambioTotalUSD, true) }} / Bs.{{ formatMoney(cambioTotalBs, true) }}</span>
+                    </div>
+
+                    <div class="d-grid gap-2 mt-3">
+                        <button v-if="totalPagadoUSD >= totalCarritoUSD" @click="procesarVenta('contado')" class="btn btn-success btn-lg">
+                            <i class="fas fa-check"></i> Finalizar Venta (Contado)
+                        </button>
+                        <button @click="cerrarCarrito" class="btn btn-secondary btn-sm">Cerrar / Seguir Comprando</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="mostrarModalFactura" class="fixed-top w-100 h-100 d-flex align-items-center justify-content-center" style="background: rgba(0,0,0,0.8); z-index: 3000;">
+            <div class="bg-white p-4 rounded shadow text-center" style="width: 90%; max-width: 400px;">
+                <div id="area-impresion" class="text-start">
+                    <div class="text-center mb-3">
+                        <h4 class="fw-bold mb-0">{{ config.nombreComercial || 'MI NEGOCIO' }}</h4>
+                        <small v-if="config.rif">RIF: {{ config.rif }}</small>
+                        <small v-if="config.direccion"><br>{{ config.direccion }}</small>
+                    </div>
+                    <hr class="my-2">
+                    <p class="mb-1">Factura: {{ facturaActual.id }}</p>
+                    <p class="mb-1">Estado: <span :class="['fw-bold', facturaActual.estado === 'ANULADA' ? 'text-danger' : 'text-success']">{{ facturaActual.estado }}</span></p>
+                    <p class="mb-1">Fecha: {{ new Date(facturaActual.id).toLocaleString() }}</p>
+                    <p class="mb-1 fw-bold">Cliente: {{ facturaActual.cliente.nombre || 'Consumidor Final' }}</p>
+                    <p class="mb-1 small">C.I/RIF: {{ facturaActual.cliente.cedula || 'N/A' }} | Tlf: {{ facturaActual.cliente.telefono || 'N/A' }}</p>
+                    <hr class="my-2">
+
+                    <div v-for="item in facturaActual.items" :key="item.id" class="d-flex justify-content-between" style="font-size: 0.9em;">
+                        <span>{{ formatMoney(item.cantidad) }}x {{ item.nombre }}</span>
+                        <span>${{ formatMoney(item.cantidad * item.precioUSD, true) }}</span>
+                    </div>
+
+                    <hr class="my-2">
+                    
+                    <div class="d-flex justify-content-between fw-bold">
+                        <span>TOTAL VENTA:</span>
+                        <span class="total-final-usd">${{ formatMoney(facturaActual.totalUSD, true) }}</span>
+                    </div>
+                    <div class="d-flex justify-content-between fw-bold mb-3">
+                        <span>TOTAL VENTA:</span>
+                        <span class="text-danger">Bs.{{ formatMoney(facturaActual.totalUSD * facturaActual.tasaUsada, true) }}</span>
+                    </div>
+
+                    <div v-if="facturaActual.estado !== 'ANULADA'">
+                        <div v-for="pago in facturaActual.pagos" :key="pago.id" class="d-flex justify-content-between" style="font-size: 0.9em;">
+                            <span>Pago ({{ pago.metodo }}):</span>
+                            <span :class="{'text-danger': pago.metodo !== 'dolares'}">{{ pago.metodo === 'dolares' ? '$' : 'Bs.' }} {{ formatMoney(pago.montoDisplay, true) }}</span>
+                        </div>
+                        
+                        <hr class="my-2">
+                        <div class="d-flex justify-content-between" style="font-size: 0.9em;">
+                            <span class="fw-bold">Cambio USD:</span>
+                            <span class="text-success">${{ formatMoney(facturaActual.cambioUSD, true) }}</span>
+                        </div>
+                        <div class="d-flex justify-content-between" style="font-size: 0.9em;">
+                            <span class="fw-bold">Cambio BS:</span>
+                            <span class="text-danger">Bs.{{ formatMoney(facturaActual.cambioBs, true) }}</span>
+                        </div>
+                    </div>
+                    
+                    <p class="text-center small mt-3">¡Gracias por su compra!</p>
+                </div>
+                <div class="mt-3 d-grid gap-2 no-print"><button onclick="window.print()" class="btn btn-primary">Imprimir</button><button @click="cerrarFactura" class="btn btn-secondary">Cerrar</button></div>
+            </div>
+        </div>
+
+        <div v-if="mostrarModalReporte" class="fixed-top w-100 h-100 d-flex align-items-center justify-content-center" style="background: rgba(0,0,0,0.8); z-index: 3000;">
+            <div class="bg-white p-4 rounded shadow text-center" style="width: 90%; max-width: 500px;">
+                <div id="reporte-impresion" class="text-start" style="font-family: monospace; font-size: 10px;">
+                    <div class="text-center mb-3">
+                        <h4 class="fw-bold mb-0">{{ config.nombreComercial || 'MI NEGOCIO' }}</h4>
+                        <small>RIF: {{ config.rif || 'N/A' }} | Generado: {{ new Date().toLocaleString() }}</small>
+                        <h5 class="mt-2 text-decoration-underline">{{ reporteImprimir.tipo === 'Z' ? 'REPORTE Z / CIERRE DE CAJA' : 'REPORTE X (DETALLADO)' }}</h5>
+                        <p class="mb-0 small">Filtro: **{{ reporteImprimir.descripcionPeriodo }}**</p>
+                        <p class="mb-0 small fw-bold">Cajero: {{ reporteImprimir.cajero || 'TODOS' }}</p>
+                    </div>
+                    <hr class="my-2">
+
+                    <div v-if="reporteImprimir.tipo === 'Z'">
+                        <p class="fw-bold text-center">RESUMEN DE VENTA (USD):</p>
+                        <div class="d-flex justify-content-between"><span>**VENTA TOTAL NETA:**</span><span class="fw-bold text-end">${{ formatMoney(reporteImprimir.resumen.totalVenta, true) }}</span></div>
+                        <div class="d-flex justify-content-between"><span>**COSTO TOTAL:**</span><span class="fw-bold text-end text-danger">${{ formatMoney(reporteImprimir.resumen.totalCosto, true) }}</span></div>
+                        <hr class="my-1">
+                        <div class="d-flex justify-content-between"><span>**UTILIDAD/GANANCIA:**</span><span class="fw-bold text-end text-primary">${{ formatMoney(reporteImprimir.resumen.utilidad, true) }}</span></div>
+                        <hr class="my-1">
+
+                        <p class="fw-bold text-center mt-3">RECAUDACIÓN DETALLADA:</p>
+                        <div v-for="(monto, metodo) in reporteImprimir.resumen.totalesPago" :key="metodo" class="d-flex justify-content-between">
+                            <span>Total en {{ metodo.replace(/_/g, ' ').toUpperCase() }}:</span>
+                            <span class="fw-bold text-end">
+                                <span v-if="metodo === 'dolares'">$</span>
+                                <span v-else>Bs.</span>
+                                {{ formatMoney(monto, true) }}
+                            </span>
+                        </div>
+                        <hr class="my-1">
+                        <div class="d-flex justify-content-between"><span>**TOTAL RECIBIDO EN CAJA (USD):**</span><span class="fw-bold text-end text-success">${{ formatMoney(reporteImprimir.resumen.totalRecaudadoUSD, true) }}</span></div>
+                        <div class="d-flex justify-content-between"><span>**CAMBIO TOTAL ENTREGADO (USD):**</span><span class="fw-bold text-end text-danger">${{ formatMoney(reporteImprimir.resumen.totalCambioUSD, true) }}</span></div>
+                        <hr class="my-1">
+                        <div class="d-flex justify-content-between fw-bold"><span>Total de Facturas:</span><span class="fw-bold text-end">{{ reporteImprimir.resumen.cantidadVentas }}</span></div>
+                        <div class="d-flex justify-content-between fw-bold"><span>Total Anuladas:</span><span class="fw-bold text-end">{{ reporteImprimir.resumen.cantidadAnuladas }}</span></div>
+                    </div>
+
+                    <div v-if="reporteImprimir.tipo === 'X'">
+                        <p class="fw-bold text-center">DETALLE POR PRODUCTO:</p>
+                        <table class="table table-sm" style="font-size: 8px;">
+                            <thead>
+                                <tr>
+                                    <th>Producto</th>
+                                    <th class="text-end">Cant</th>
+                                    <th class="text-end">P.Venta</th>
+                                    <th class="text-end">Costo</th>
+                                    <th class="text-end">Total Margen</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="(item, index) in reporteImprimir.detallado" :key="index">
+                                    <td>{{ item.nombre.substring(0, 15) }}...</td>
+                                    <td class="text-end">{{ formatMoney(item.cantidad) }}</td>
+                                    <td class="text-end">${{ formatMoney(item.precioUSD, true) }}</td>
+                                    <td class="text-end text-danger">${{ formatMoney(item.costoLoteUSD, true) }}</td>
+                                    <td class="text-end fw-bold text-primary">${{ formatMoney(item.totalMargen, true) }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <hr class="my-1">
+                        <div class="d-flex justify-content-between"><span>**VENTA TOTAL NETA:**</span><span class="fw-bold text-end">${{ formatMoney(reporteImprimir.resumen.totalVenta, true) }}</span></div>
+                        <div class="d-flex justify-content-between"><span>**UTILIDAD TOTAL:**</span><span class="fw-bold text-end text-primary">${{ formatMoney(reporteImprimir.resumen.utilidad, true) }}</span></div>
+                        <hr class="my-1">
+                    </div>
+
+                    <p class="text-center small mt-3">Fin del Reporte.</p>
+                </div>
+                <div class="mt-3 d-grid gap-2 no-print"><button onclick="window.print()" class="btn btn-primary">Imprimir Reporte</button><button @click="mostrarModalReporte = false" class="btn btn-secondary">Cerrar</button></div>
+            </div>
+        </div>
+
+        <div v-if="mostrarModalAnular" class="fixed-top w-100 h-100 d-flex align-items-center justify-content-center" style="background: rgba(0,0,0,0.8); z-index: 3500;">
+            <div class="bg-white p-4 rounded shadow" style="width: 90%; max-width: 350px;">
+                <h5 class="text-danger mb-3"><i class="fas fa-exclamation-triangle"></i> Autorización de Anulación</h5>
+                <p class="text-muted small">Para anular la factura **#{{ ventaAnular.id }}** (Total: ${{ formatMoney(ventaAnular.totalUSD, true) }}) y devolver el inventario, se requiere la clave de un **Supervisor** o **Administrador**.</p>
+                
+                <input type="text" v-model="autorizacion.username" class="form-control mb-2" placeholder="Usuario Superior" @keyup.enter="autorizarAnulacion">
+                <input type="password" v-model="autorizacion.password" class="form-control mb-3" placeholder="Clave Superior" @keyup.enter="autorizarAnulacion">
+                
+                <div class="d-grid gap-2">
+                    <button @click="autorizarAnulacion" class="btn btn-danger" :disabled="!autorizacion.username || !autorizacion.password">
+                        Anular y Devolver Inventario
+                    </button>
+                    <button @click="cerrarModalAnular" class="btn btn-secondary">Cancelar</button>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="mostrarModalCierre" class="fixed-top w-100 h-100 d-flex align-items-center justify-content-center" style="background: rgba(0,0,0,0.8); z-index: 3500;">
+            <div class="bg-white p-4 rounded shadow" style="width: 90%; max-width: 450px;">
+                <h5 class="text-warning mb-3"><i class="fas fa-hourglass-end me-2"></i> **Cierre de Caja - {{ currentUser.username }}**</h5>
+                <p class="text-muted small">Este reporte resume sus ventas desde el último cierre de caja (o inicio de sesión).</p>
+                
+                <div class="alert alert-info py-2 small">
+                    <span class="fw-bold">Última Venta:</span> {{ ultimoCierre.toLocaleTimeString() }} ({{ ultimoCierre.toLocaleDateString() }})
+                </div>
+
+                <div class="row g-2 text-center border-bottom pb-3 mb-3">
+                    <div class="col-4">
+                        <small class="text-muted">Ventas Netas ($)</small>
+                        <h5 class="text-success fw-bold">${{ formatMoney(cierreData.resumen.totalVenta, true) }}</h5>
+                    </div>
+                    <div class="col-4">
+                        <small class="text-muted">Utilidad ($)</small>
+                        <h5 class="text-primary fw-bold">${{ formatMoney(cierreData.resumen.utilidad, true) }}</h5>
+                    </div>
+                    <div class="col-4">
+                        <small class="text-muted"># Facturas</small>
+                        <h5 class="text-dark fw-bold">{{ cierreData.resumen.cantidadVentas }}</h5>
+                    </div>
+                </div>
+
+                <h6 class="fw-bold text-muted border-bottom pb-1 mb-2">Total Recaudado</h6>
+                <div v-for="(monto, metodo) in cierreData.resumen.totalesPago" :key="metodo" class="d-flex justify-content-between mb-1">
+                    <span class="small">{{ metodo.replace(/_/g, ' ').toUpperCase() }}</span>
+                    <span class="fw-bold">
+                         <span v-if="metodo === 'dolares'">$</span>
+                         <span v-else>Bs.</span>
+                         {{ formatMoney(monto, true) }}
+                    </span>
+                </div>
+                
+                <hr>
+
+                <div class="d-grid gap-2 mt-3">
+                    <button @click="imprimirCierreCaja" class="btn btn-warning">
+                        <i class="fas fa-print"></i> Imprimir Cierre de Caja
+                    </button>
+                    <button @click="mostrarModalCierre = false" class="btn btn-secondary">Cerrar</button>
+                </div>
+            </div>
+        </div>
+
+
+        <div id="etiquetas-pdf-content" class="d-none">
+            </div>
+
+    </div></div>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    const { createApp } = Vue;
+
+    createApp({
+        data() {
+            const today = new Date().toISOString().split('T')[0];
+            return {
+                vistaActual: 'pos',
+                mostrarModalCarrito: false,
+                mostrarModalFactura: false,
+                mostrarModalReporte: false,
+                mostrarModalAnular: false, 
+                mostrarModalCierre: false, 
+                tasaBCV: 40.00,
+                busqueda: '',
+                
+                // === CONFIGURACIÓN DE SEGURIDAD FINAL ===
+                isLoggedIn: false, 
+                currentUser: { username: '', role: '' }, 
+                // =======================================
+                
+                loginData: { username: '', password: '' },
+                
+                config: { nombreComercial: 'MI NEGOCIO', rif: 'J-12345678', direccion: 'Dirección Principal' },
+                
+                nuevoProducto: { nombre: '', precioUSD: null, costoUSD: null, stock: 0, unidadMedida: 'Unidad' },
+                loteData: { productoId: null, stock: 0, costoUSD: 0, fechaVencimiento: '', proveedor: 'General' },
+                modalLotes: { visible: false, producto: {} },
+                
+                mostrarModalCantidad: false,
+                productoEnVenta: {},
+                cantidadEnVenta: 0,
+                
+                clienteActual: { nombre: '', cedula: '', telefono: '', direccion: '' }, 
+
+                pagos: [], 
+                metodoPagoNuevo: 'dolares',
+                montoRecibido: 0, 
+
+                facturaActual: {},
+                
+                inventario: [],
+                carrito: [],
+                ventas: [],
+                users: [], 
+                cierreCaja: [], 
+
+                // Reportes
+                filtroReporte: {
+                    tipo: 'rango', 
+                    fechaInicio: today,
+                    fechaFin: today,
+                    usuario: '' 
+                },
+                ventasFiltradas: [],
+                reporteImprimir: { tipo: '', descripcionPeriodo: '', resumen: {}, detallado: [], cajero: 'TODOS' },
+                
+                // Cierre de Caja
+                ultimoCierre: new Date(0), 
+                
+                // Anulación
+                ventaAnular: {},
+                autorizacion: { username: '', password: '' },
+                nuevoUsuario: { username: '', password: '', role: 'cajero' } 
+            }
+        },
+        watch: {
+            tasaBCV() { this.guardarDatos(); },
+        },
+        mounted() {
+            this.cargarDatos(); 
+            const session = JSON.parse(sessionStorage.getItem('pos_current_user'));
+            
+            if (session) { 
+                this.currentUser = session;
+                this.isLoggedIn = true;
+            }
+            
+            if (this.isLoggedIn) {
+                this.setUltimoCierre(); 
+                this.aplicarFiltro();
+            }
+        },
+        computed: {
+            productosFiltrados() { 
+                return this.inventario.filter(p => p.nombre.toLowerCase().includes(this.busqueda.toLowerCase())); 
+            },
+            totalCarritoUSD() { return this.carrito.reduce((t, i) => t + (i.precioUSD * i.cantidad), 0); },
+            carritoItemsCount() { return this.carrito.reduce((acc, item) => acc + item.cantidad, 0); },
+            totalPagadoUSD() { return this.pagos.reduce((t, p) => t + p.montoUSD, 0); },
+            cambioTotalUSD() { return Math.max(0, this.totalPagadoUSD - this.totalCarritoUSD); },
+            cambioTotalBs() { return this.cambioTotalUSD * this.tasaBCV; },
+            productoSeleccionadoLote() {
+                return this.inventario.find(p => p.id === this.loteData.productoId) || { precioUSD: 0 };
+            },
+            costoPromedioProductoLote() {
+                if (!this.loteData.productoId) return 0;
+                return this.calcularCostoPromedio(this.productoSeleccionadoLote);
+            },
+            esDataInventarioValida() {
+                return (
+                    this.nuevoProducto.nombre &&
+                    this.nuevoProducto.unidadMedida &&
+                    this.nuevoProducto.precioUSD !== null &&
+                    this.nuevoProducto.precioUSD >= 0 &&
+                    this.nuevoProducto.costoUSD !== null &&
+                    this.nuevoProducto.costoUSD >= 0 &&
+                    this.nuevoProducto.stock > 0
+                );
+            },
+            ventasOrdenadas() {
+                return [...this.ventas].sort((a, b) => b.id - a.id);
+            },
+            
+            // **COMPUTED PARA REPORTES Y CIERRE**
+            ventasValidasFiltradas() {
+                return this.ventasFiltradas.filter(v => v.estado !== 'ANULADA');
+            },
+
+            reporteResumen() {
+                const totalVenta = this.ventasValidasFiltradas.reduce((sum, v) => sum + v.totalUSD, 0);
+                const totalCosto = this.ventasValidasFiltradas.reduce((sum, v) => sum + 
+                    v.items.reduce((itemSum, item) => itemSum + (item.cantidad * (item.costoLoteUSD || 0)), 0), 0);
+                
+                const totalesPagoReporte = {};
+                let totalRecaudadoUSD = 0;
+                let totalCambioUSD = 0;
+                
+                this.ventasValidasFiltradas.forEach(venta => {
+                    totalCambioUSD += venta.cambioUSD;
+                    
+                    venta.pagos.forEach(pago => {
+                        const key = pago.metodo.replace(' ', '_');
+                        totalesPagoReporte[key] = (totalesPagoReporte[key] || 0) + pago.montoDisplay;
+                        totalRecaudadoUSD += pago.montoUSD;
+                    });
+                });
+                
+                return {
+                    totalVenta: totalVenta,
+                    totalCosto: totalCosto,
+                    utilidad: totalVenta - totalCosto,
+                    totalesPago: totalesPagoReporte,
+                    totalRecaudadoUSD: totalRecaudadoUSD,
+                    totalCambioUSD: totalCambioUSD,
+                    cantidadVentas: this.ventasValidasFiltradas.length,
+                    cantidadAnuladas: this.ventasFiltradas.filter(v => v.estado === 'ANULADA').length
+                };
+            },
+
+            reporteDetallado() {
+                const detalle = {};
+                
+                this.ventasValidasFiltradas.forEach(venta => {
+                    venta.items.forEach(item => {
+                        if (!detalle[item.id]) {
+                            detalle[item.id] = {
+                                id: item.id,
+                                nombre: item.nombre,
+                                unidadMedida: item.unidadMedida,
+                                cantidad: 0,
+                                precioUSD: item.precioUSD,
+                                costoLoteUSD: item.costoLoteUSD,
+                                margenUnidad: item.precioUSD - item.costoLoteUSD
+                            };
+                        }
+                        detalle[item.id].cantidad += item.cantidad;
+                    });
+                });
+                
+                return Object.values(detalle).map(item => ({
+                    ...item,
+                    totalVenta: item.cantidad * item.precioUSD,
+                    totalCosto: item.cantidad * item.costoLoteUSD,
+                    totalMargen: item.cantidad * item.margenUnidad
+                })).sort((a, b) => b.totalVenta - a.totalVenta);
+            },
+
+            descripcionPeriodo() {
+                if (this.filtroReporte.tipo === 'usuario') {
+                    return `Ventas de: ${this.filtroReporte.usuario || 'TODOS'}`;
+                }
+                return `Desde: ${this.filtroReporte.fechaInicio} hasta ${this.filtroReporte.fechaFin}`;
+            },
+
+            cierreData() {
+                const ventasCajero = this.ventas.filter(v => 
+                    v.usuario === this.currentUser.username && 
+                    v.id > this.ultimoCierre.getTime()
+                );
+
+                const resumen = this.calcularResumenDeVentas(ventasCajero);
+                
+                return {
+                    ventas: ventasCajero,
+                    resumen: resumen
+                };
+            }
+        },
+        methods: {
+            formatMoney(v, isCurrency = false) { 
+                if (isCurrency) {
+                    return v ? v.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00'; 
+                } else {
+                    return v ? v.toLocaleString('es-VE', { minimumFractionDigits: 0, maximumFractionDigits: 3 }) : '0';
+                }
+            },
+            checkPermission(requiredRoles) {
+                return requiredRoles.includes(this.currentUser.role);
+            },
+
+            // --- GESTIÓN DE SEGURIDAD Y DATOS AISLADOS ---
+            
+            // NUEVO MÉTODO PARA OBTENER EL CLIENT ID DE LA URL
+            getClientId() {
+                const urlParams = new URLSearchParams(window.location.search);
+                const clientId = urlParams.get('client');
+                
+                if (!clientId) {
+                    // Si el ID falta, alertamos y usamos una clave para que el sistema no falle.
+                    // Pero los datos estarán bajo 'pos_data_ID_UNICO_REQUERIDO' y no los datos reales.
+                    console.error('ERROR DE LICENCIA: URL incompleta. Debe tener un identificador de cliente (?client=ID_UNICO).');
+                    return 'ID_UNICO_REQUERIDO'; 
+                }
+                
+                // Limpia el ID y lo convierte a mayúsculas para un formato de clave seguro
+                return clientId.replace(/[^a-zA-Z0-9_]/g, '').toUpperCase(); 
+            },
+            
+            login() {
+                const user = this.users.find(u => u.username === this.loginData.username && u.password === this.loginData.password);
+                if (user) {
+                    this.currentUser = user;
+                    this.isLoggedIn = true;
+                    this.loginData = { username: '', password: '' };
+                    sessionStorage.setItem('pos_current_user', JSON.stringify(user));
+                    this.setUltimoCierre(); 
+                    this.aplicarFiltro();
+                } else {
+                    alert('Usuario o clave incorrecta.');
+                }
+            },
+            logout() {
+                sessionStorage.removeItem('pos_current_user');
+                this.currentUser = { username: '', role: '' };
+                this.isLoggedIn = false;
+            },
+            
+            setUltimoCierre() {
+                const lastClose = this.cierreCaja.filter(c => c.usuario === this.currentUser.username)
+                                                .sort((a, b) => b.id - a.id)[0];
+                this.ultimoCierre = lastClose ? new Date(lastClose.id) : new Date(0);
+            },
+
+            cargarDatos() {
+                // DEFINICIÓN DE USUARIOS POR DEFECTO REFORZADA
+                const defaultUsers = [
+                    { username: 'admin', password: '12345', role: 'admin' },
+                    { username: 'admin1', password: '0000', role: 'admin' }, 
+                    { username: 'supervisor', password: '54321', role: 'supervisor' },
+                    { username: 'cajero', password: '11111', role: 'cajero' },
+                ];
+
+                // --- AISLAMIENTO DE DATOS ---
+                const clientId = this.getClientId();
+                const storageKey = 'pos_data_' + clientId;
+                // ---------------------------
+                
+                const db = JSON.parse(localStorage.getItem(storageKey)); // Usa la clave única
+                if (db) {
+                    this.inventario = db.inventario || [];
+                    this.tasaBCV = db.tasaBCV || 40.00;
+                    this.ventas = db.ventas || [];
+                    this.users = db.users || defaultUsers;
+                    this.config = db.config || this.config; 
+                    this.cierreCaja = db.cierreCaja || []; 
+                    
+                    // Asegurar que los usuarios por defecto estén si la DB existe.
+                    defaultUsers.forEach(dUser => {
+                        if (!this.users.find(u => u.username === dUser.username)) {
+                            this.users.push(dUser);
+                        }
+                    });
+
+                } else {
+                    this.users = defaultUsers;
+                }
+                
+                this.inventario = this.inventario.map(p => {
+                    if (!p.lotes) p.lotes = [];
+                    p.stockTotal = p.lotes.reduce((sum, lote) => sum + lote.stock, 0);
+                    return p;
+                });
+            },
+            guardarDatos() {
+                // --- AISLAMIENTO DE DATOS ---
+                const clientId = this.getClientId();
+                const storageKey = 'pos_data_' + clientId;
+                // ---------------------------
+
+                localStorage.setItem(storageKey, JSON.stringify({ // Usa la clave única
+                    inventario: this.inventario, 
+                    tasaBCV: this.tasaBCV, 
+                    ventas: this.ventas, 
+                    users: this.users, 
+                    config: this.config, 
+                    cierreCaja: this.cierreCaja
+                }));
+            },
+            
+            crearUsuario() {
+                const existing = this.users.find(u => u.username === this.nuevoUsuario.username);
+                if (existing) {
+                    alert('El usuario ya existe.');
+                    return;
+                }
+                this.users.push({ ...this.nuevoUsuario });
+                this.nuevoUsuario = { username: '', password: '', role: 'cajero' };
+                this.guardarDatos();
+                alert('Usuario creado con éxito.');
+            },
+            
+            // (El resto de los métodos como cierres, reportes, inventario, etc., se mantienen sin cambios ya que usan las funciones cargar/guardar Datos)
+            
+            // --- LÓGICA DE CIERRE DE CAJA ---
+
+            abrirModalCierre() {
+                this.mostrarModalCierre = true;
+            },
+
+            calcularResumenDeVentas(ventasLista) {
+                const ventasValidas = ventasLista.filter(v => v.estado !== 'ANULADA');
+                
+                const totalVenta = ventasValidas.reduce((sum, v) => sum + v.totalUSD, 0);
+                const totalCosto = ventasValidas.reduce((sum, v) => sum + 
+                    v.items.reduce((itemSum, item) => itemSum + (item.cantidad * (item.costoLoteUSD || 0)), 0), 0);
+                
+                const totalesPago = {};
+                let totalRecaudadoUSD = 0;
+                let totalCambioUSD = 0;
+
+                ventasValidas.forEach(venta => {
+                    totalCambioUSD += venta.cambioUSD;
+                    venta.pagos.forEach(pago => {
+                        const key = pago.metodo.replace(' ', '_');
+                        totalesPago[key] = (totalesPago[key] || 0) + pago.montoDisplay;
+                        totalRecaudadoUSD += pago.montoUSD;
+                    });
+                });
+
+                return {
+                    totalVenta: totalVenta,
+                    totalCosto: totalCosto,
+                    utilidad: totalVenta - totalCosto,
+                    totalesPago: totalesPago,
+                    totalRecaudadoUSD: totalRecaudadoUSD,
+                    totalCambioUSD: totalCambioUSD,
+                    cantidadVentas: ventasValidas.length,
+                    cantidadAnuladas: ventasLista.filter(v => v.estado === 'ANULADA').length
+                };
+            },
+
+            imprimirCierreCaja() {
+                if (this.cierreData.ventas.length === 0) return alert('No hay ventas registradas desde el último cierre para este usuario.');
+
+                const resumen = this.cierreData.resumen;
+                const cierreId = Date.now();
+                
+                this.cierreCaja.push({
+                    id: cierreId,
+                    usuario: this.currentUser.username,
+                    fechaCierre: cierreId,
+                    fechaInicio: this.ultimoCierre.getTime(),
+                    resumen: resumen
+                });
+
+                this.setUltimoCierre(); 
+                this.guardarDatos();
+                this.mostrarModalCierre = false;
+                
+                const reporte = {
+                    tipo: 'Z',
+                    descripcionPeriodo: `Desde ${this.ultimoCierre.toLocaleTimeString()} hasta ${new Date(cierreId).toLocaleTimeString()}`,
+                    resumen: resumen,
+                    detallado: [],
+                    cajero: this.currentUser.username
+                };
+
+                this.generarModalReporte(reporte);
+            },
+            
+            // --- LÓGICA DE REPORTES ---
+
+            aplicarFiltro() {
+                let ventasFiltrar = this.ventas;
+
+                if (this.filtroReporte.tipo === 'usuario' && this.filtroReporte.usuario) {
+                    ventasFiltrar = ventasFiltrar.filter(v => v.usuario === this.filtroReporte.usuario);
+                }
+
+                if (this.filtroReporte.tipo === 'rango' || this.filtroReporte.usuario) { 
+                    let fechaInicio = new Date(this.filtroReporte.fechaInicio);
+                    let fechaFin = new Date(this.filtroReporte.fechaFin);
+                    
+                    fechaInicio.setHours(0, 0, 0, 0);
+                    fechaFin.setHours(23, 59, 59, 999);
+
+                    const timestampInicio = fechaInicio.getTime();
+                    const timestampFin = fechaFin.getTime();
+                    
+                    this.ventasFiltradas = ventasFiltrar.filter(venta => {
+                        return venta.id >= timestampInicio && venta.id <= timestampFin;
+                    });
+                } else {
+                    this.ventasFiltradas = ventasFiltrar; 
+                }
+
+                if (this.vistaActual === 'reportes' && this.filtroReporte.tipo === 'usuario' && !this.filtroReporte.usuario) {
+                    this.filtroReporte.tipo = 'rango'; 
+                    this.aplicarFiltro();
+                }
+            },
+            
+            imprimirReporte(tipo) {
+                if (this.ventasFiltradas.length === 0) return alert('No hay ventas para generar este reporte con el filtro actual.');
+
+                const reporte = {
+                    tipo: tipo,
+                    descripcionPeriodo: this.descripcionPeriodo,
+                    resumen: this.reporteResumen,
+                    detallado: (tipo === 'X') ? this.reporteDetallado : [],
+                    cajero: this.filtroReporte.tipo === 'usuario' ? (this.filtroReporte.usuario || 'TODOS') : 'TODOS'
+                };
+                
+                this.generarModalReporte(reporte);
+            },
+
+            generarModalReporte(reporteData) {
+                this.reporteImprimir = reporteData;
+                this.mostrarModalReporte = true;
+            },
+            
+            // --- GESTIÓN DE ANULACIÓN ---
+            abrirModalAnular(venta) {
+                this.ventaAnular = venta;
+                this.autorizacion = { username: '', password: '' };
+                this.mostrarModalAnular = true;
+            },
+
+            cerrarModalAnular() {
+                this.mostrarModalAnular = false;
+                this.ventaAnular = {};
+                this.autorizacion = { username: '', password: '' };
+            },
+
+            autorizarAnulacion() {
+                const user = this.users.find(u => 
+                    u.username === this.autorizacion.username && 
+                    u.password === this.autorizacion.password
+                );
+
+                if (!user) {
+                    return alert('Autorización denegada. Usuario o clave incorrecta.');
+                }
+                
+                if (user.role !== 'admin' && user.role !== 'supervisor') {
+                    return alert(`Autorización denegada. El usuario ${user.username} no tiene rol de Supervisor o Administrador.`);
+                }
+                
+                this.anularFactura(this.ventaAnular);
+                this.cerrarModalAnular();
+            },
+
+            anularFactura(venta) {
+                if (venta.estado === 'ANULADA') return alert('Esta factura ya está anulada.');
+
+                venta.estado = 'ANULADA';
+                venta.fechaAnulacion = Date.now();
+                venta.usuarioAnulacion = this.autorizacion.username;
+                
+                venta.items.forEach(itemVenta => {
+                    const prodInventario = this.inventario.find(p => p.id === itemVenta.id);
+                    if (!prodInventario) return;
+
+                    itemVenta.lotesConsumidosRegistro.forEach(consumo => {
+                        let loteEncontrado = prodInventario.lotes.find(l => 
+                            l.costoUSD === consumo.costoUSD && 
+                            l.fechaVencimiento === consumo.fechaVencimiento && 
+                            l.proveedor === consumo.proveedor
+                        );
+                        
+                        if (loteEncontrado) {
+                            loteEncontrado.stock += consumo.cantidad;
+                        } else {
+                            prodInventario.lotes.push({
+                                stock: consumo.cantidad,
+                                costoUSD: consumo.costoUSD,
+                                proveedor: consumo.proveedor,
+                                fechaVencimiento: consumo.fechaVencimiento
+                            });
+                        }
+                    });
+
+                    this.recalcularStockTotal(prodInventario);
+                    this.ordenarLotesFIFO(prodInventario.lotes); 
+                });
+                
+                this.guardarDatos();
+                this.aplicarFiltro(); 
+                alert(`Factura #${venta.id} ha sido ANULADA y el inventario devuelto.`);
+                this.mostrarDetalleFactura(venta); 
+            },
+            
+            // --- GESTIÓN DE INVENTARIO Y POS ---
+
+            recalcularStockTotal(prod) {
+                prod.stockTotal = prod.lotes.reduce((sum, lote) => sum + lote.stock, 0);
+            },
+            
+            calcularCostoPromedio(prod) {
+                if (prod.stockTotal === 0 || prod.lotes.length === 0) return 0;
+                const costoTotal = prod.lotes.reduce((sum, lote) => sum + (lote.stock * lote.costoUSD), 0);
+                return costoTotal / prod.stockTotal;
+            },
+
+            ordenarLotesFIFO(lotes) {
+                 lotes.sort((a, b) => {
+                    const dateA = a.fechaVencimiento ? new Date(a.fechaVencimiento) : new Date('9999-12-31');
+                    const dateB = b.fechaVencimiento ? new Date(b.fechaVencimiento) : new Date('9999-12-31');
+                    return dateA.getTime() - dateB.getTime();
+                });
+            },
+
+            iniciarVenta(prod) {
+                if(prod.stockTotal <= 0) return alert(`Sin stock de ${prod.nombre}.`);
+                this.productoEnVenta = prod;
+                this.cantidadEnVenta = 0;
+                this.mostrarModalCantidad = true;
+            },
+
+            agregarAlCarrito(prod, cantidad) {
+                if(cantidad <= 0 || cantidad > prod.stockTotal) {
+                     alert(`Cantidad inválida o excede el stock. Máximo: ${this.formatMoney(prod.stockTotal)}`);
+                     this.mostrarModalCantidad = false;
+                     return;
+                }
+                const itemIndex = this.carrito.findIndex(i => i.id === prod.id);
+                if (itemIndex !== -1) {
+                    this.carrito[itemIndex].cantidad += cantidad;
+                } else {
+                    this.carrito.push({ ...prod, cantidad: cantidad, costoLoteUSD: 0, lotesConsumidosRegistro: [] });
+                }
+                this.mostrarModalCantidad = false;
+                this.cantidadEnVenta = 0;
+            },
+
+            removerItem(index) {
+                this.carrito.splice(index, 1);
+                if (this.carrito.length === 0) {
+                    this.mostrarModalCarrito = false;
+                    this.clienteActual = { nombre: '', cedula: '', telefono: '', direccion: '' };
+                }
+            },
+            
+            abrirCarrito() {
+                this.mostrarModalCarrito = true;
+            },
+            
+            cerrarCarrito() {
+                this.mostrarModalCarrito = false;
+            },
+
+            removerPago(index) {
+                this.pagos.splice(index, 1);
+            },
+
+            agregarPago() {
+                if (this.montoRecibido <= 0) return alert('Ingrese un monto válido.');
+                let montoUSD = 0;
+                let montoDisplay = this.montoRecibido;
+                
+                if (this.metodoPagoNuevo === 'bolivares' || this.metodoPagoNuevo === 'pago_movil' || this.metodoPagoNuevo === 'transferencia' || this.metodoPagoNuevo === 'tarjeta') {
+                    montoUSD = this.montoRecibido / this.tasaBCV;
+                } else {
+                    montoUSD = this.montoRecibido;
+                    montoDisplay = this.montoRecibido;
+                }
+
+                this.pagos.push({
+                    metodo: this.metodoPagoNuevo,
+                    montoUSD: montoUSD,
+                    montoDisplay: montoDisplay 
+                });
+                this.montoRecibido = 0;
+            },
+
+            procesarVenta(tipo) {
+                if (this.carrito.length === 0) return;
+                if (this.totalPagadoUSD < this.totalCarritoUSD) return alert('El monto pagado es insuficiente.');
+                
+                const venta = {
+                    id: Date.now(), 
+                    items: [],
+                    totalUSD: this.totalCarritoUSD, 
+                    tasaUsada: this.tasaBCV, 
+                    tipo: tipo, 
+                    estado: 'PAGADO', 
+                    usuario: this.currentUser.username,
+                    pagos: JSON.parse(JSON.stringify(this.pagos)), 
+                    cambioUSD: this.cambioTotalUSD, 
+                    cambioBs: this.cambioTotalBs,
+                    cliente: JSON.parse(JSON.stringify(this.clienteActual))
+                };
+
+                let ventaExitosa = true;
+                
+                this.carrito.forEach(item => {
+                    const prodInventario = this.inventario.find(p => p.id === item.id);
+                    if (!prodInventario || prodInventario.stockTotal < item.cantidad) {
+                        alert(`Error crítico de stock para ${item.nombre}.`);
+                        ventaExitosa = false;
+                        return;
+                    }
+                    
+                    let cantidadRestante = item.cantidad;
+                    let costoTotalVentaItem = 0;
+                    
+                    this.ordenarLotesFIFO(prodInventario.lotes);
+
+                    const lotesActualizados = [];
+                    const lotesConsumidosRegistro = [];
+                    
+                    for (const lote of prodInventario.lotes) {
+                        if (cantidadRestante <= 0) {
+                            lotesActualizados.push(lote); 
+                            continue;
+                        }
+                        
+                        const consumoLote = Math.min(cantidadRestante, lote.stock);
+                        
+                        if (consumoLote > 0) {
+                            costoTotalVentaItem += consumoLote * lote.costoUSD;
+                            
+                            lotesConsumidosRegistro.push({
+                                cantidad: consumoLote,
+                                costoUSD: lote.costoUSD, 
+                                proveedor: lote.proveedor,
+                                fechaVencimiento: lote.fechaVencimiento
+                            });
+
+                            lote.stock -= consumoLote;
+                            cantidadRestante -= consumoLote;
+                        }
+                        
+                        if (lote.stock > 0) {
+                            lotesActualizados.push(lote); 
+                        }
+                    }
+                    
+                    prodInventario.lotes = lotesActualizados;
+                    this.recalcularStockTotal(prodInventario);
+
+                    venta.items.push({ 
+                        ...item, 
+                        costoLoteUSD: costoTotalVentaItem / item.cantidad,
+                        lotesConsumidosRegistro: lotesConsumidosRegistro 
+                    });
+                });
+                
+                if (!ventaExitosa) return;
+                
+                this.ventas.push(venta);
+                
+                this.mostrarModalCarrito = false; 
+                this.carrito = []; 
+                this.pagos = [];
+                this.clienteActual = { nombre: '', cedula: '', telefono: '', direccion: '' };
+                
+                this.guardarDatos();
+                
+                this.facturaActual = venta; 
+                this.mostrarModalFactura = true;
+
+                this.aplicarFiltro();
+            },
+            
+            // --- GESTIÓN DE CONFIGURACIÓN Y MANTENIMIENTO ---
+            guardarConfigTienda() {
+                this.guardarDatos();
+                alert('Configuración de tienda guardada.');
+            },
+
+            verificarAccion(accion, param = null) {
+                if (!this.checkPermission(['admin'])) {
+                    return alert('Permiso denegado. Solo los administradores pueden realizar esta acción.');
+                }
+                
+                let confirmMessage = '';
+                let actionFunc = null;
+
+                if (accion === 'limpiarDatos') {
+                    confirmMessage = 'ADVERTENCIA: ¿Está seguro de que desea BORRAR TODOS LOS DATOS del sistema (Ventas, Inventario, Cajas)?';
+                    actionFunc = this.limpiarDatos;
+                } else if (accion === 'eliminarProducto') {
+                    confirmMessage = '¿Está seguro de eliminar este producto y todos sus lotes?';
+                    actionFunc = () => this.eliminarProducto(param);
+                } else if (accion === 'eliminarUsuario') {
+                    confirmMessage = `¿Está seguro de eliminar al usuario ${param}?`;
+                    actionFunc = () => this.eliminarUsuario(param);
+                } else {
+                    return;
+                }
+
+                if (confirm(confirmMessage)) {
+                    actionFunc();
+                }
+            },
+
+            eliminarProducto(id) {
+                this.inventario = this.inventario.filter(p => p.id !== id);
+                this.guardarDatos();
+                alert('Producto eliminado.');
+            },
+
+            eliminarUsuario(username) {
+                this.users = this.users.filter(u => u.username !== username);
+                this.guardarDatos();
+                alert(`Usuario ${username} eliminado.`);
+            },
+
+            // Los métodos de respaldo y limpieza se mantienen, solo para referencia
+            descargarRespaldo() {
+                const clientId = this.getClientId();
+                const storageKey = 'pos_data_' + clientId;
+                
+                const data = localStorage.getItem(storageKey);
+                const blob = new Blob([data], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `pos_respaldo_${clientId}_${new Date().toISOString().slice(0, 10)}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                alert('Respaldo descargado con éxito.');
+            },
+            cargarRespaldo(event) {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const loadedData = JSON.parse(e.target.result);
+                        
+                        // Obtenemos el ID del cliente actual para asegurar que estamos cargando en la clave correcta
+                        const clientId = this.getClientId();
+                        const storageKey = 'pos_data_' + clientId;
+                        
+                        if (confirm(`Al cargar el respaldo se SOBREESCRIBIRÁN todos los datos de ${clientId}. ¿Desea continuar?`)) {
+                            localStorage.setItem(storageKey, JSON.stringify(loadedData));
+                            this.cargarDatos(); 
+                            alert('Respaldo cargado con éxito. Por favor, vuelva a iniciar sesión.');
+                            this.logout(); 
+                        }
+                    } catch (error) {
+                        alert('Error al cargar el archivo de respaldo. Asegúrese de que sea un archivo JSON válido.');
+                    }
+                };
+                reader.readAsText(file);
+            },
+            limpiarDatos() {
+                const defaultUsers = this.users.filter(u => u.role === 'admin'); 
+                this.inventario = [];
+                this.ventas = [];
+                this.carrito = [];
+                this.cierreCaja = []; 
+                this.users = defaultUsers; 
+                this.guardarDatos();
+                alert('Todos los datos (excepto los administradores) han sido eliminados.');
+                this.logout();
+            },
+            
+            // (Se omiten métodos de inventario y PDF que son extensos y no están relacionados con el bug actual)
+            crearProductoInventarioInicial() {
+                const id = Date.now();
+                
+                const loteInicial = {
+                    stock: this.nuevoProducto.stock,
+                    costoUSD: this.nuevoProducto.costoUSD,
+                    proveedor: 'Inventario Inicial',
+                    fechaVencimiento: ''
+                };
+
+                this.inventario.push({
+                    id: id,
+                    nombre: this.nuevoProducto.nombre,
+                    precioUSD: this.nuevoProducto.precioUSD,
+                    unidadMedida: this.nuevoProducto.unidadMedida,
+                    stockTotal: this.nuevoProducto.stock,
+                    lotes: [loteInicial]
+                });
+
+                this.nuevoProducto = { nombre: '', precioUSD: null, costoUSD: null, stock: 0, unidadMedida: 'Unidad' };
+                this.guardarDatos();
+                alert('Producto e inventario inicial registrados.');
+            },
+            registrarLote() {
+                if (!this.loteData.productoId || this.loteData.stock <= 0 || this.loteData.costoUSD < 0) {
+                    return alert('Por favor, complete todos los campos obligatorios del lote.');
+                }
+
+                const prod = this.inventario.find(p => p.id === this.loteData.productoId);
+                if (!prod) return;
+
+                prod.lotes.push({
+                    stock: this.loteData.stock,
+                    costoUSD: this.loteData.costoUSD,
+                    proveedor: this.loteData.proveedor || 'General',
+                    fechaVencimiento: this.loteData.fechaVencimiento
+                });
+                
+                this.recalcularStockTotal(prod);
+                this.ordenarLotesFIFO(prod.lotes);
+
+                this.loteData = { productoId: null, stock: 0, costoUSD: 0, fechaVencimiento: '', proveedor: 'General' };
+                this.guardarDatos();
+                alert('Lote registrado con éxito.');
+            },
+            mostrarLotes(prod) {
+                this.modalLotes.producto = prod;
+                this.modalLotes.visible = true;
+            },
+            ajustarPrecioRapido(prod) {
+                const newPrice = prompt(`Ajustar Precio de ${prod.nombre} (USD):`, prod.precioUSD);
+                const price = parseFloat(newPrice);
+                if (!isNaN(price) && price >= 0) {
+                    prod.precioUSD = price;
+                    this.guardarDatos();
+                    alert(`Precio de ${prod.nombre} actualizado a $${this.formatMoney(price, true)}.`);
+                } else if (newPrice !== null) {
+                    alert('Precio inválido.');
+                }
+            },
+            mostrarDetalleFactura(venta) {
+                this.facturaActual = venta;
+                this.mostrarModalFactura = true;
+            },
+            cerrarFactura() {
+                this.mostrarModalFactura = false;
+                this.facturaActual = {};
+            },
+            generarEtiquetasPDF() {
+                alert("La función de generación de PDF requiere librerías externas (como jsPDF) que no están incluidas en este archivo simple para mantenerlo ligero y funcional.");
+                // Si el usuario instalara jsPDF, la lógica iría aquí:
+                // 1. Recorrer this.inventario.
+                // 2. Crear una nueva página PDF por cada producto.
+                // 3. Añadir nombre, precio USD y precio BS (calculado con this.tasaBCV) a cada etiqueta.
+                // 4. Guardar/Mostrar el PDF.
+            }
+        }
+    }).mount('#app');
+</script>
+</body>
+</html>
